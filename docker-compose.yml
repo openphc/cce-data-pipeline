@@ -3,7 +3,8 @@
 #
 # This repo owns the analytics path only: ClickHouse + a Kafka Connect worker running the
 # Debezium PostgreSQL source connector. It plugs into the EXISTING platform stack
-# (github.com/openphc/deploy-scripts) over the shared external network `cce-net`:
+# (github.com/openphc/deploy-scripts) over a shared external docker network (PIPELINE_NETWORK,
+# default `cce-net` — see the networks: block below):
 #   - Kafka broker (confluentinc/cp-kafka, KRaft) — already deployed
 #   - PostgreSQL `ccedb` — already deployed (the CDC source)
 #   - Prometheus + Grafana — already deployed (reuse them; provisioning artifacts live in infra/)
@@ -27,7 +28,7 @@ services:
     container_name: cce-clickhouse
     ports:
       - "8123:8123"   # HTTP interface
-      - "${CH_NATIVE_PORT:-9000}:9000"   # Native protocol (host port configurable to avoid collisions, e.g. 9009)
+      - "${CLICKHOUSE_NATIVE_PORT:-9000}:9000"   # Native protocol (host port configurable to avoid collisions, e.g. 9009)
       - "9363:9363"   # Prometheus metrics
     environment:
       CLICKHOUSE_DB: cce_analytics
@@ -48,7 +49,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    networks: [cce-net]
     deploy:
       resources:
         limits:
@@ -73,7 +73,6 @@ services:
       STATUS_STORAGE_REPLICATION_FACTOR: "1"
       KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
       VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
-    networks: [cce-net]
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8083/ || exit 1"]
       interval: 15s
@@ -84,9 +83,17 @@ services:
 volumes:
   clickhouse-data:
 
-# The platform's shared network (created by github.com/openphc/deploy-scripts).
-# Lets ClickHouse + Kafka Connect reach the existing kafka broker and ccedb, and lets
-# cce-insights-service reach ClickHouse. Create it there, or `docker network create cce-net`.
+# Attach to the platform's EXISTING shared docker network so ClickHouse + Kafka Connect can reach
+# the Kafka broker and ccedb by name (and cce-insights-service can reach ClickHouse). This is the
+# compose default network for every service above, set to an external network so it joins (not
+# creates) the platform's network.
+#
+# Defaults to `cce-net` (created by github.com/openphc/deploy-scripts, or `docker network create
+# cce-net`). If your infra runs as a SEPARATE compose project (so its default network is e.g.
+# `infrastructure_default`), point PIPELINE_NETWORK at that network instead of standing up a
+# second bridge — dual-homing port-published containers across two networks breaks published-port
+# routing.
 networks:
-  cce-net:
+  default:
     external: true
+    name: ${PIPELINE_NETWORK:-cce-net}

@@ -4,11 +4,11 @@
     "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
     "tasks.max": "1",
 
-    "database.hostname": "${CDC_PG_HOST}",
-    "database.port": "${CDC_PG_PORT}",
-    "database.user": "${CDC_USER}",
-    "database.password": "${CDC_PASSWORD}",
-    "database.dbname": "${CDC_PG_DATABASE}",
+    "database.hostname": "${POSTGRES_HOST}",
+    "database.port": "${POSTGRES_PORT}",
+    "database.user": "${POSTGRES_READ_ONLY_USER}",
+    "database.password": "${POSTGRES_READ_ONLY_PASSWORD}",
+    "database.dbname": "${POSTGRES_DATABASE}",
 
     "topic.prefix": "cce",
     "plugin.name": "pgoutput",

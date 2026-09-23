@@ -9,9 +9,9 @@ CH_PORT="${2:-8123}"
 CH_URL="http://${CH_HOST}:${CH_PORT}"
 # cce_analytics is owned by cce_pipeline, so every query below must authenticate. Without this,
 # `curl -f` turns the 401 into an empty string and the checks silently misreport (e.g. "database
-# does not exist"). /ping needs no auth. Override via CH_USER / CLICKHOUSE_PASSWORD (or CH_PASSWORD).
-CH_USER="${CH_USER:-cce_pipeline}"
-CH_PASS="${CH_PASSWORD:-${CLICKHOUSE_PASSWORD:-cce_analytics_dev}}"
+# does not exist"). /ping needs no auth. Override via CLICKHOUSE_USER / CLICKHOUSE_PASSWORD.
+CH_USER="${CLICKHOUSE_USER:-cce_pipeline}"
+CH_PASS="${CLICKHOUSE_PASSWORD:-cce_analytics_dev}"
 
 echo "=== ClickHouse Schema Validation ==="
 echo "Target: ${CH_URL}"

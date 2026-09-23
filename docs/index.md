@@ -59,7 +59,7 @@ Files relate to components in one of four ways:
 | `infra/clickhouse/*.xml` | ClickHouse | mounted (config.d / users.d) | `config.xml` (server tuning, metrics), `named-collections.xml` (`cce_kafka` broker via `from_env`), `users.xml` (`cce_pipeline` grants; `analytics` profile w/ `final=1` available) |
 | `infra/prometheus/`, `infra/grafana/` | Prometheus + Grafana (platform) | read at runtime (imported there) | Scrape config, data sources, the pipeline-health dashboard, and alerts — shipped here, added to the platform's instances |
 | `docker-compose.yml` | Docker (starts ClickHouse + Kafka Connect) | read by Docker | Images, ports, env, volume mounts, the external `cce-net` network |
-| `.env` (from `.env.example`) | Docker Compose **and** the scripts | read at runtime | Single source of truth: `KAFKA_BOOTSTRAP_SERVERS`, `CLICKHOUSE_PASSWORD`, `CDC_*`, `CONNECT_URL` |
+| `.env` (from `.env.example`) | Docker Compose **and** the scripts | read at runtime | Single source of truth: `KAFKA_BOOTSTRAP_SERVERS`, `CLICKHOUSE_PASSWORD`, `POSTGRES_*`, `CONNECT_URL` |
 | `scripts/*.sh` | drives Kafka Connect / Postgres / ClickHouse | run by operator/CI | Register the connector, health-check, re-snapshot, validate CDC config, validate ClickHouse, data-quality checks |
 | `tests/*.sh` | drives the whole path | run by operator/CI | End-to-end smoke test and a source-load test |
 

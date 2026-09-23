@@ -38,8 +38,8 @@ These are **outcomes to confirm**, not separate manual steps — the scripts bel
 All source-side CDC setup is defined **once** in [`cdc/01-configure-replication.sql`](../cdc/01-configure-replication.sql) — the single source of truth. It sets `wal_level=logical`, the slot/WAL limits (`max_replication_slots`, `max_wal_senders`, `max_slot_wal_keep_size`), the `cce_cdc_user` role, `REPLICA IDENTITY FULL` on all 14 tables, and the `cce_analytics_pub` publication. Run it once as a privileged role, then verify:
 
 ```bash
-psql -h "$CDC_PG_HOST" -U postgres -d "$CDC_PG_DATABASE" -f cdc/01-configure-replication.sql
-./scripts/validate-cdc-config.sh "$CDC_PG_HOST" "$CDC_PG_PORT" postgres "$CDC_PG_DATABASE"
+psql -h "$POSTGRES_HOST" -U postgres -d "$POSTGRES_DATABASE" -f cdc/01-configure-replication.sql
+./scripts/validate-cdc-config.sh "$POSTGRES_HOST" "$POSTGRES_PORT" postgres "$POSTGRES_DATABASE"
 ```
 
 - If `wal_level` was not already `logical`, PostgreSQL must be **restarted** for it to take effect (the script changes the setting but cannot restart the server).
@@ -50,7 +50,7 @@ psql -h "$CDC_PG_HOST" -U postgres -d "$CDC_PG_DATABASE" -f cdc/01-configure-rep
 | Secret | Purpose | Required By |
 |--------|---------|-------------|
 | `CLICKHOUSE_PASSWORD` | ClickHouse `cce_pipeline` user | clickhouse, cce-insights-service |
-| `CDC_PASSWORD` | PostgreSQL replication user (`cce_cdc_user`) | Debezium connector |
+| `POSTGRES_READ_ONLY_PASSWORD` | PostgreSQL replication user (`cce_cdc_user`) | Debezium connector |
 
 
 ---
@@ -146,12 +146,12 @@ flowchart TD
 ## 5. Debezium Connector Setup
 
 The Debezium PostgreSQL source connector is registered on the Kafka Connect worker via its
-REST API (`:8083`). `register-connectors.sh` interpolates `${CDC_*}` from `.env` into
+REST API (`:8083`). `register-connectors.sh` interpolates `${POSTGRES_*}` from `.env` into
 `connectors/debezium-postgres-source.json` and POSTs it. It is **not** run automatically by
 `docker compose up`.
 
 ```bash
-set -a; source .env; set +a   # CDC_PG_*, CDC_USER, CDC_PASSWORD, CONNECT_URL
+set -a; source .env; set +a   # POSTGRES_*, CONNECT_URL
 ./scripts/register-connectors.sh
 ```
 
@@ -176,8 +176,8 @@ Kafka-engine ingestion (schema/01–02) must exist before the connector starts**
 consumer MVs are ready to land the snapshot.
 
 ```bash
-CH_HOST=${CH_HOST:-localhost}
-CH_USER=${CH_USER:-cce_pipeline}
+CH_HOST=${CLICKHOUSE_HOST:-localhost}
+CH_USER=${CLICKHOUSE_USER:-cce_pipeline}
 CH_PASS=${CLICKHOUSE_PASSWORD:-cce_analytics_dev}
 CH="clickhouse-client --host $CH_HOST --user $CH_USER --password $CH_PASS --database cce_analytics --multiquery"
 
@@ -484,7 +484,7 @@ docker compose logs kafka-connect | grep -i error
 # Common fixes:
 # - PostgreSQL: wal_level=logical, slot + publication exist, REPLICA IDENTITY FULL
 #   (./scripts/validate-cdc-config.sh <pg-host> <pg-port> <pg-user> ccedb)
-# - Connectivity: Kafka Connect can reach ccedb (CDC_PG_HOST) and the kafka broker on cce-net
+# - Connectivity: Kafka Connect can reach ccedb (POSTGRES_HOST) and the kafka broker on cce-net
 # - Re-register after fixing: ./scripts/register-connectors.sh
 ```
 

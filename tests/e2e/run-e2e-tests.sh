@@ -5,8 +5,8 @@
 
 set -euo pipefail
 
-CH_HOST="${1:-localhost}"
-CH_PORT="${CH_PORT:-8123}"
+CLICKHOUSE_HOST="${1:-localhost}"
+CLICKHOUSE_PORT="${CLICKHOUSE_PORT:-8123}"
 CH_DB="cce_analytics"
 
 # Kafka Connect REST + Debezium connector
@@ -27,12 +27,12 @@ log_fail() { echo -e "  ${RED}[FAIL]${NC} $1"; FAIL=$((FAIL + 1)); }
 log_info() { echo -e "  ${YELLOW}[INFO]${NC} $1"; }
 
 ch_query() {
-    curl -s "http://${CH_HOST}:${CH_PORT}/?database=${CH_DB}" --data-binary "$1"
+    curl -s "http://${CLICKHOUSE_HOST}:${CLICKHOUSE_PORT}/?database=${CH_DB}" --data-binary "$1"
 }
 
 # ============================================================
 echo "=== CCE Data Pipeline — E2E Test Suite ==="
-echo "ClickHouse:    ${CH_HOST}:${CH_PORT}"
+echo "ClickHouse:    ${CLICKHOUSE_HOST}:${CLICKHOUSE_PORT}"
 echo "Kafka Connect: ${CONNECT_URL}"
 echo ""
 
@@ -40,7 +40,7 @@ echo ""
 echo "--- 1. Service Health Checks ---"
 
 # ClickHouse
-if curl -sf "http://${CH_HOST}:${CH_PORT}/ping" > /dev/null; then
+if curl -sf "http://${CLICKHOUSE_HOST}:${CLICKHOUSE_PORT}/ping" > /dev/null; then
     log_pass "ClickHouse is healthy"
 else
     log_fail "ClickHouse is not responding"

@@ -29,7 +29,7 @@ ccedb (PG16) → Debezium (Kafka Connect) → Kafka topics (cce.public.*)
 > the external `cce-net` network. Bring that up first (or `docker network create cce-net`).
 
 ```bash
-cp .env.example .env   # edit CDC_*/CLICKHOUSE_PASSWORD/KAFKA_BOOTSTRAP_SERVERS
+cp .env.example .env   # edit POSTGRES_*/CLICKHOUSE_PASSWORD/KAFKA_BOOTSTRAP_SERVERS
 set -a; source .env; set +a
 
 # Start ClickHouse + Kafka Connect (joins the shared cce-net)
@@ -38,9 +38,11 @@ docker compose up -d
 # 1. ClickHouse schema: base tables, Kafka-engine queues + consumer MVs, aggregation MVs, indexes, dicts, rollups, daily-summary MVs
 # (schema/09 is a manual, parameterised backfill — intentionally excluded from the apply loop)
 for f in schema/0[1-8]*.sql; do clickhouse-client --database cce_analytics --multiquery < "$f"; done
+# …or over HTTP (no clickhouse-client needed; applies 01–06, 08, 07 in dependency order):
+#   python3 scripts/apply-schema.py schema
 
 # 2. Configure logical replication on the source ccedb (publication + REPLICA IDENTITY FULL)
-psql -h "$CDC_PG_HOST" -U postgres -d "$CDC_PG_DATABASE" -f cdc/01-configure-replication.sql
+psql -h "$POSTGRES_HOST" -U postgres -d "$POSTGRES_DATABASE" -f cdc/01-configure-replication.sql
 
 # 3. Register the Debezium connector on Kafka Connect (starts the initial snapshot)
 ./scripts/register-connectors.sh
@@ -87,6 +89,7 @@ For the complete MV catalog and coverage matrix, see [Data Flow & Schema Design 
 
 | Script | Purpose |
 |--------|---------|
+| `scripts/apply-schema.py` | Apply the ClickHouse schema (01–06, 08, 07) over HTTP |
 | `scripts/register-connectors.sh` | Register/update the Debezium source connector on Kafka Connect |
 | `scripts/check-connector-health.sh` | Debezium connector + ClickHouse ingestion health |
 | `scripts/resnapshot-mirror.sh` | Reset offsets + drop slot + truncate + re-snapshot |

@@ -15,14 +15,14 @@ set -euo pipefail
 CONNECT_URL="${CONNECT_URL:-http://localhost:8083}"
 NAME="cce-ccedb-source"
 
-CH_HOST="${CH_HOST:-localhost}"
-CH_USER="${CH_USER:-cce_pipeline}"
-CH_PASS="${CH_PASSWORD:-${CLICKHOUSE_PASSWORD:-cce_analytics_dev}}"
-CH_URL="http://${CH_HOST}:${CH_PORT:-8123}"
+CLICKHOUSE_HOST="${CLICKHOUSE_HOST:-localhost}"
+CH_USER="${CLICKHOUSE_USER:-cce_pipeline}"
+CH_PASS="${CLICKHOUSE_PASSWORD:-cce_analytics_dev}"
+CH_URL="http://${CLICKHOUSE_HOST}:${CLICKHOUSE_PORT:-8123}"
 
 # Source PG (to drop the replication slot) — optional but recommended for a clean snapshot.
-PG_HOST="${CDC_PG_HOST:-localhost}"; PG_PORT="${CDC_PG_PORT:-5432}"
-PG_DB="${CDC_PG_DATABASE:-ccedb}"; PG_SUPER="${PG_SUPERUSER:-postgres}"
+PG_HOST="${POSTGRES_HOST:-localhost}"; PG_PORT="${POSTGRES_PORT:-5432}"
+PG_DB="${POSTGRES_DATABASE:-ccedb}"; PG_SUPER="${PG_SUPERUSER:-postgres}"
 
 echo "=== Debezium Connector Re-snapshot ==="
 echo "Connect: ${CONNECT_URL}   Connector: ${NAME}"
@@ -61,7 +61,7 @@ chq() { curl -sf --user "${CH_USER}:${CH_PASS}" "${CH_URL}/" --data-binary "$1" 
 if curl -sf "${CH_URL}/ping" >/dev/null 2>&1; then
     TABLES=$(curl -sf --user "${CH_USER}:${CH_PASS}" "${CH_URL}/?query=SELECT+name+FROM+system.tables+WHERE+database='cce_analytics'+AND+(engine='ReplacingMergeTree'+OR+engine='SummingMergeTree'+OR+engine='AggregatingMergeTree')" 2>/dev/null || true)
     if [[ -z "$TABLES" ]]; then
-        echo "  ✗ no tables returned — check CH_USER/CH_PASS (cce_analytics requires auth). Aborting to avoid a double-loaded snapshot." >&2
+        echo "  ✗ no tables returned — check CLICKHOUSE_USER/CLICKHOUSE_PASSWORD (cce_analytics requires auth). Aborting to avoid a double-loaded snapshot." >&2
         exit 1
     fi
     for t in $TABLES; do chq "TRUNCATE TABLE cce_analytics.\`${t}\`" && echo "    ✓ ${t}"; done
