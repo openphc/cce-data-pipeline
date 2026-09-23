@@ -22,7 +22,8 @@
 ### Pre-deployment Checklist
 These are **outcomes to confirm**, not separate manual steps — the scripts below produce them.
 - [ ] Platform stack up on `cce-net` (Kafka, `ccedb`, Prometheus/Grafana) — or at least `docker network create cce-net`
-- [ ] **PostgreSQL source prepared** by `cdc/01-configure-replication.sql` and confirmed by `scripts/validate-cdc-config.sh` — i.e. `wal_level=logical`, role `cce_cdc_user`, `REPLICA IDENTITY FULL` on all 14 tables, and publication `cce_analytics_pub`
+- [ ] **`ccedb` is on the CCE 2.0.0 schema** — the Protocol, Matcher and Collector services have run their Flyway migrations (deploy order Protocol → Matcher → Step SLA), or a 1.x database was upgraded with `cce-matcher-service/migration/run-upgrade.sh`. `cdc/01` names 2.0.0 tables (`matcher_event_log`, `step_sla_state_transition`) and fails against a 1.x schema.
+- [ ] **PostgreSQL source prepared** by `cdc/01-configure-replication.sql` and confirmed by `scripts/validate-cdc-config.sh` — i.e. `wal_level=logical`, role `cce_cdc_user`, `REPLICA IDENTITY FULL` on all 15 tables, and publication `cce_analytics_pub`
 - [ ] PostgreSQL **restarted** if `wal_level` had to change (logical replication needs the restart)
 - [ ] ClickHouse database `cce_analytics` + user `cce_pipeline` created (done by the container env on first boot)
 - [ ] Kafka Connect reachable at `$CONNECT_URL`; broker reachable from Kafka Connect **and** ClickHouse
@@ -33,9 +34,20 @@ These are **outcomes to confirm**, not separate manual steps — the scripts bel
 > it on first connect. Only the *publication* must pre-exist (the connector sets
 > `publication.autocreate.mode=disabled`), which `cdc/01` creates.
 
+> **Moving from 1.x: rebuild ClickHouse, don't migrate it.** The 2.0.0 ClickHouse schema is not an
+> in-place upgrade of the 1.x one — tables were renamed (`compliance_event_logs` → `matcher_event_logs`),
+> columns replaced (`step_instances.state` → `step_status` + `sla_status`) and a table added
+> (`step_sla_state_transitions`). Everything in `cce_analytics` is derived from `ccedb`, so drop the
+> database, apply the schema below, and let Debezium take a fresh initial snapshot of the upgraded
+> `ccedb`. The old connector's committed offsets and replication slot would otherwise make it resume
+> streaming instead of snapshotting — reset them first (`scripts/resnapshot-mirror.sh` steps 1–2, or
+> delete the connector and drop `cce_analytics_slot`). The 1.x Kafka topics
+> (`cce.public.compliance_event_log`, and the old-shape messages on the others) have no reader in
+> 2.0.0 and can be deleted.
+
 ### PostgreSQL Configuration
 
-All source-side CDC setup is defined **once** in [`cdc/01-configure-replication.sql`](../cdc/01-configure-replication.sql) — the single source of truth. It sets `wal_level=logical`, the slot/WAL limits (`max_replication_slots`, `max_wal_senders`, `max_slot_wal_keep_size`), the `cce_cdc_user` role, `REPLICA IDENTITY FULL` on all 14 tables, and the `cce_analytics_pub` publication. Run it once as a privileged role, then verify:
+All source-side CDC setup is defined **once** in [`cdc/01-configure-replication.sql`](../cdc/01-configure-replication.sql) — the single source of truth. It sets `wal_level=logical`, the slot/WAL limits (`max_replication_slots`, `max_wal_senders`, `max_slot_wal_keep_size`), the `cce_cdc_user` role, `REPLICA IDENTITY FULL` on all 15 tables, and the `cce_analytics_pub` publication. Run it once as a privileged role, then verify:
 
 ```bash
 psql -h "$POSTGRES_HOST" -U postgres -d "$POSTGRES_DATABASE" -f cdc/01-configure-replication.sql
@@ -181,8 +193,8 @@ CH_USER=${CLICKHOUSE_USER:-cce_pipeline}
 CH_PASS=${CLICKHOUSE_PASSWORD:-cce_analytics_dev}
 CH="clickhouse-client --host $CH_HOST --user $CH_USER --password $CH_PASS --database cce_analytics --multiquery"
 
-$CH < schema/01-create-tables.sql          # 14 base tables — ReplacingMergeTree(_version, _is_deleted)
-$CH < schema/02-kafka-ingestion.sql        # Kafka-engine queue + consumer MV per table (14 each; needs the broker reachable)
+$CH < schema/01-create-tables.sql          # 15 base tables — ReplacingMergeTree(_version, _is_deleted)
+$CH < schema/02-kafka-ingestion.sql        # Kafka-engine queue + consumer MV per table (15 each; needs the broker reachable)
 $CH < schema/03-create-materialized-views.sql
 $CH < schema/04-create-indexes.sql
 $CH < schema/05-create-dictionary.sql
@@ -242,9 +254,9 @@ Then register the Debezium connector (§5) to start the snapshot.
 | Check | Command | Expected |
 |-------|---------|----------|
 | ClickHouse alive | `curl -s http://localhost:8123/ping` | `Ok.` |
-| Tables exist | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics'"` | `>= 14` |
-| MVs + consumer MVs exist | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics' AND engine='MaterializedView'"` | `>= 34` (12 aggregation + 14 consumer + 3 rollup + 5 daily-summary) |
-| Kafka queues exist | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics' AND engine='Kafka'"` | `14` |
+| Tables exist | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics'"` | `>= 15` |
+| MVs + consumer MVs exist | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics' AND engine='MaterializedView'"` | `>= 35` (12 aggregation + 15 consumer + 3 rollup + 5 daily-summary) |
+| Kafka queues exist | `clickhouse-client -q "SELECT count() FROM system.tables WHERE database='cce_analytics' AND engine='Kafka'"` | `15` |
 | Data flowing | `clickhouse-client -q "SELECT count() FROM cce_analytics.inbound_event_logs"` | `> 0` after snapshot |
 | Debezium connector | `./scripts/check-connector-health.sh` | `HEALTHY` |
 | Connector status | `curl -s $CONNECT_URL/connectors/cce-ccedb-source/status \| jq .connector.state` | `RUNNING` |

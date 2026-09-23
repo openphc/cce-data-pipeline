@@ -106,12 +106,12 @@ else
     log_fail "protocol_instances is empty"
 fi
 
-# Verify compliance_event_logs CDC
-CE_COUNT=$(ch_query "SELECT count() FROM compliance_event_logs FINAL" | tr -d '[:space:]')
+# Verify matcher_event_logs CDC
+CE_COUNT=$(ch_query "SELECT count() FROM matcher_event_logs FINAL" | tr -d '[:space:]')
 if [[ "$CE_COUNT" -ge 0 ]]; then
-    log_pass "compliance_event_logs reachable (${CE_COUNT} rows)"
+    log_pass "matcher_event_logs reachable (${CE_COUNT} rows)"
 else
-    log_fail "compliance_event_logs missing"
+    log_fail "matcher_event_logs missing"
 fi
 
 # ============================================================

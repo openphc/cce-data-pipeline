@@ -6,8 +6,9 @@
 graph TB
     subgraph Existing["CCE Platform"]
         COLLECTOR["CCE Collector Service"]
-        COMPLIANCE["CCE Compliance Service"]
-        SCHEDULER["CCE Scheduler Service"]
+        PROTOCOL["CCE Protocol Service"]
+        MATCHER["CCE Matcher Service"]
+        STEPSLA["CCE Step SLA Service"]
         INTELLIGENCE["CCE Intelligence Service"]
         PG["PostgreSQL 16<br/>(ccedb)"]
     end
@@ -32,8 +33,9 @@ graph TB
     end
 
     COLLECTOR --> PG
-    COMPLIANCE --> PG
-    SCHEDULER --> PG
+    PROTOCOL --> PG
+    MATCHER --> PG
+    STEPSLA --> PG
     INTELLIGENCE --> PG
 
     PG -->|"CDC (WAL, pgoutput)"| DBZ
@@ -51,7 +53,7 @@ graph TB
     classDef presentation fill:#9B59B6,stroke:#8E44AD,color:white
     classDef users fill:#27AE60,stroke:#1E8449,color:white
 
-    class COLLECTOR,COMPLIANCE,SCHEDULER,INTELLIGENCE,PG existing
+    class COLLECTOR,PROTOCOL,MATCHER,STEPSLA,INTELLIGENCE,PG existing
     class KAFKA platform
     class DBZ,CLICKHOUSE pipeline
     class INSIGHTS presentation
@@ -145,7 +147,7 @@ the apps own presentation and query ClickHouse via the `cce_pipeline` user.
 
 A **Debezium PostgreSQL source connector** (on a Kafka Connect worker, `pgoutput` plugin) reads `ccedb`'s WAL and publishes JSON change events to Kafka topics `cce.public.<table>`. **ClickHouse ingests Kafka directly**: per source table there is a Kafka-engine "queue" table and a consumer MV (`schema/02-kafka-ingestion.sql`) that parses the Debezium envelope and inserts the flat row into the `ReplacingMergeTree(_version, _is_deleted)` base table (`schema/01`). There is **no ClickHouse sink connector and no S3 staging**.
 
-All 14 CDC tables reside in the shared `ccedb` database (columns reconciled against the live schema). The connector excludes two large unused JSONB columns (`intelligence_event_log.event_payload`, `intelligence_delivery.fhir_payload`); `receiver_adaptor` + `destination_adaptor_mapping` **are** captured (they hold adaptor name/endpoint/routing, which is not denormalized onto `intelligence_delivery`). `facility` is now CDC'd from the compliance service (no longer a static reference list), and the two append-only `*_history` tables are captured for backfill. For the full table listing, connector config, and the envelope-parsing details, see [Data Flow & Schema Design](data-flow.md).
+All 15 CDC tables reside in the shared `ccedb` database (columns follow the CCE 2.0.0 schema — see `cce-common-util/docs/data-dictionary.md`). The connector excludes two large unused JSONB columns (`intelligence_event_log.event_payload`, `intelligence_delivery.fhir_payload`); `receiver_adaptor` + `destination_adaptor_mapping` **are** captured (they hold adaptor name/endpoint/routing, which is not denormalized onto `intelligence_delivery`). `facility` is CDC'd from the matcher service (no longer a static reference list), `step_sla_state_transition` is captured for the SLA thresholds it carries, and the two append-only `*_history` tables are captured for backfill. For the full table listing, connector config, and the envelope-parsing details, see [Data Flow & Schema Design](data-flow.md).
 
 **CDC-metadata columns** (derived by the consumer MV from the Debezium envelope):
 - `_version` — Debezium `source.lsn` (monotonic WAL position) → ReplacingMergeTree dedup version
@@ -159,7 +161,7 @@ All 14 CDC tables reside in the shared `ccedb` database (columns reconciled agai
 - **Kafka table engine** — consumes the Debezium topics directly; consumer MVs parse the envelope into base tables (no sink connector)
 - **ReplacingMergeTree(_version, _is_deleted)** — `clean_deleted_rows = 'Always'`: dedup by `_version` (`source.lsn`), physically removes deletes on merge
 - **MATERIALIZED columns** — Extract JSON fields from `raw_payload` at insert time (zero query cost), defined inline in table DDL
-- **Materialized Views** — 12 aggregation MVs on append-only sources; 5 refreshable daily-summary MVs (schema/07, `ReplacingMergeTree` backing — compliance in APPEND mode; the `event_time`/occurrence-keyed event, deviation, adoption, and referral MVs full-recompute over a 12-month rolling window); mutable entities served by the `argMaxState` current-state rollups or `FINAL`
+- **Materialized Views** — 12 aggregation MVs (schema/03) — 10 insert-triggered on append-only sources, plus the two deviation-by-protocol/patient MVs as 30 s refreshable recomputes, since they must join `step_instances`; 5 refreshable daily-summary MVs (schema/07, `ReplacingMergeTree` backing — compliance in APPEND mode; the `event_time`/occurrence-keyed event, deviation, adoption, and referral MVs full-recompute over a 12-month rolling window); mutable entities served by the `argMaxState` current-state rollups or `FINAL`
 - **AggregatingMergeTree** — incremental aggregation with `-State`/`-Merge` (append-only sources) and `argMaxState` current-state rollups (mutable entities)
 - **SummingMergeTree** — Simple additive rollups (counts per hour/day)
 - **Dictionaries** — Fast key-value lookups replacing JOINs (4 dictionaries; the `QUERY...FINAL` sources avoid duplicate rows from unmerged parts — `dict_patient_facility` instead dedups via `argMax` GROUP BY)
@@ -243,20 +245,21 @@ The daily-summary MVs in `schema/07` implement this: the `event_time`-derived MV
 | **Compliance** | Adherence rate, enrollment status, step metrics, deviation breakdown per protocol/day | `rollup_protocol_instance_current` + `rollup_step_current` (argMaxState, schema/06) → `mv_daily_compliance_kpis` (schema/07) |
 | **Facility Activity / Ranking** | Active/inactive facility counts, active facility rate, facility ranking | Computed **live** in the insights service — active-facility tiles read `mv_event_volume_hourly` (event_time-keyed); ranking from the enrolled-patient cohort + `inbound_event_logs`. (`mv_daily_facility_kpis` / `mv_daily_facility_activity_summary` were **removed** — no live reader.) |
 | **e-Buzima Adoption** | Actual vs expected patients per facility per day, adoption rate, reporting gap | `inbound_event_logs` (clinical footfall, `event_time`) + `facility` (CDC'd, schema/01) → `mv_daily_adoption_kpis` (schema/07) |
-| **Referrals** | Received by HIE (accepted `TRANSFER_ENCOUNTER` events; dev/demo fallback = accepted event that completed a Referral step) + compliant (matched to a Referral step) / non-compliant split, total + per facility (+ district), per clinical day | `inbound_event_logs` (referral marker) with a `compliance_event_logs` ⋈ `step_instances` match subquery for the compliant count (`event_time`-keyed) → `mv_daily_referral_kpis` (schema/07) |
-| **Deviations** | Overdue/missed counts, trends, by protocol/patient | `deviations` → `mv_deviation_trends`, `mv_deviation_by_protocol`, `mv_deviation_by_patient`; daily header cards via `mv_daily_deviation_kpis` (schema/07, keyed on clinical occurrence day) |
+| **Referrals** | Received by HIE (accepted `TRANSFER_ENCOUNTER` events; dev/demo fallback = accepted event that completed a Referral step) + compliant (matched to a Referral step) / non-compliant split, total + per facility (+ district), per clinical day | `inbound_event_logs` (referral marker) with a `matcher_event_logs` ⋈ `step_instances` match subquery for the compliant count (`event_time`-keyed) → `mv_daily_referral_kpis` (schema/07) |
+| **Deviations** | Overdue/missed counts, trends, by protocol/patient | `deviations` (⋈ `step_instances` for the enrolment) → `mv_deviation_trends`, `mv_deviation_by_protocol`, `mv_deviation_by_patient`; daily header cards via `mv_daily_deviation_kpis` (schema/07, keyed on clinical occurrence day — the breached threshold from `step_sla_state_transitions`) |
 | **Ingestion Quality** | Acceptance rate, rejection reasons, source quality | `inbound_event_logs` → `mv_ingestion_quality` |
 | **Intelligence & Triggers** | Trigger volume by action type, destination, reason | `intelligence_event_logs` → `mv_intelligence_summary`, `mv_intelligence_by_patient/protocol` |
 | **Delivery Performance** | Success rate, latency, errors per adaptor/protocol | `intelligence_deliveries FINAL` (base table, ReplacingMergeTree) |
-| **Step/Scheduler** | Step states, completions, protocol progress | `step_instances FINAL` (base table, ReplacingMergeTree) |
-| **State History (point-in-time)** | "As-of-date" enrollment status & step state — enables historical rebuild of the daily MVs | `protocol_instance_history` + `step_instance_history` (append-only CDC, schema/01) → `schema/09-historical-backfill.sql` |
+| **Steps & SLA** | `step_status` (completed?) × `sla_status` (on time?), protocol progress, SLA backlog | `step_instances FINAL` / `rollup_step_current`; `step_sla_state_transitions FINAL` for thresholds and processing lag |
+| **State History (point-in-time)** | "As-of-date" enrollment status & step status pair — enables historical rebuild of the daily MVs | `protocol_instance_history` + `step_instance_history` (append-only CDC, schema/01) → `schema/09-historical-backfill.sql` |
 | **Pipeline Health** | Connector state, CDC freshness, slot lag | Kafka Connect + ClickHouse metrics + Grafana |
 
-> **Why the history tables exist:** `protocol_instance.status` and `step_instance.state` are
-> UPDATE-in-place — the prior value is overwritten, so the current-state rollups (schema/06)
+> **Why the history tables exist:** `protocol_instance.status` and `step_instance.step_status` /
+> `sla_status` are UPDATE-in-place — the prior value is overwritten, so the current-state rollups (schema/06)
 > and the refreshable daily MVs (schema/07) can only ever snapshot *today*. The append-only
-> `*_history` tables (populated by the compliance service at the application layer — `StateTransitionHistoryService`,
-> Flyway `V4__state_history.sql` creates the tables) record every transition with its timestamp,
+> `*_history` tables (written at the application layer by cce-common-util's `StateTransitionHistoryWriter` —
+> Matcher for enrolment/creation/completion, Step SLA for each `sla_status`; Matcher `V1__initial_schema.sql`
+> creates the tables) record every transition with its timestamp,
 > making the daily MVs reconstructible for past
 > dates after a full re-snapshot. They are inputs to **backfill only** — normal forward operation
 > never reads them.
@@ -389,11 +392,11 @@ The pipeline is designed for forward-compatible evolution without downtime:
 | PostgreSQL table gains a column | Debezium captures it in the envelope | `ALTER TABLE ADD COLUMN` on ClickHouse + extend the consumer MV in schema/02 |
 | PostgreSQL table dropped/renamed | Connector errors on missing table | Update `table.include.list` in `connectors/debezium-postgres-source.json` |
 | New PostgreSQL table needed | Add CDC capture | Add to `table.include.list` + base table (schema/01) + queue/consumer MV (schema/02) |
-| A mutable status/state column must become point-in-time | UPDATE-in-place overwrites history | Add an append-only `*_history` table, written by the owning service at each transition in the same transaction as the change (pattern: compliance `V4__state_history.sql` + `StateTransitionHistoryService`); CDC it like any table. Capture is forward-only — seed from current state to cover pre-existing rows. |
+| A mutable status/state column must become point-in-time | UPDATE-in-place overwrites history | Add an append-only `*_history` table, written by the owning service at each transition in the same transaction as the change (pattern: the `*_history` tables in Matcher `V1__initial_schema.sql` + cce-common-util's `StateTransitionHistoryWriter`); CDC it like any table. Capture is forward-only — seed from current state to cover pre-existing rows. |
 
 **Key invariant:** The `raw_payload` column in `inbound_event_logs` stores the full CloudEvent (including FHIR resource) as-is. Any new field extraction is a non-breaking addition — historical data can always be backfilled from `raw_payload` using ClickHouse's JSON functions.
 
 > **Mutable lifecycle columns are the exception** to the backfill-from-source rule: event logs and
 > dimensions are reconstructible from their own timestamps, but `protocol_instance.status` and
-> `step_instance.state` overwrite in place. Those are covered by the append-only history pattern
+> `step_instance.step_status` / `sla_status` overwrite in place. Those are covered by the append-only history pattern
 > above — the only two tables in the schema that require it.
