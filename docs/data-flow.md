@@ -66,33 +66,38 @@ A Debezium PostgreSQL connector on Kafka Connect reads the WAL via logical repli
 | Table Owner | Source Table | ClickHouse Table |
 |-------------|-------------|-----------------|
 | Collector Service | `inbound_event_log` | `inbound_event_logs` |
-| Compliance Service | `protocol_definition` | `protocol_definitions` |
-| Compliance Service | `protocol_instance` | `protocol_instances` |
-| Compliance Service | `step_instance` | `step_instances` |
-| Compliance Service | `protocol_instance_history` | `protocol_instance_history` |
-| Compliance Service | `step_instance_history` | `step_instance_history` |
-| Compliance Service | `deviation` | `deviations` |
-| Compliance Service | `intelligence_event_log` | `intelligence_event_logs` |
-| Compliance Service | `action_definition` | `action_definitions` |
-| Compliance Service | `compliance_event_log` | `compliance_event_logs` |
-| Compliance Service | `facility` | `facility` |
+| Protocol Service | `protocol_definition` | `protocol_definitions` |
+| Protocol Service | `action_definition` | `action_definitions` |
+| Matcher Service | `protocol_instance` | `protocol_instances` |
+| Matcher Service (+ Step SLA writes `sla_status`) | `step_instance` | `step_instances` |
+| Matcher Service (Step SLA marks processed) | `step_sla_state_transition` | `step_sla_state_transitions` |
+| Matcher Service | `protocol_instance_history` | `protocol_instance_history` |
+| Matcher + Step SLA (append-only) | `step_instance_history` | `step_instance_history` |
+| Matcher + Step SLA (append-only) | `deviation` | `deviations` |
+| Matcher + Step SLA (append-only) | `intelligence_event_log` | `intelligence_event_logs` |
+| Matcher Service | `matcher_event_log` | `matcher_event_logs` |
+| Matcher Service | `facility` | `facility` |
 | Intelligence Service | `intelligence_delivery` | `intelligence_deliveries` |
 | Intelligence Service | `receiver_adaptor` | `receiver_adaptor` |
 | Intelligence Service | `destination_adaptor_mapping` | `destination_adaptor_mapping` |
 
-> **Note:** All CCE services share a single PostgreSQL database (`ccedb`). `REPLICA IDENTITY FULL` is set on all 14 tables so TOAST'd JSONB columns are fully replicated during UPDATEs. Column names/types are reconciled against the **live** `ccedb` schema.
+> **Note:** All CCE services share a single PostgreSQL database (`ccedb`). `REPLICA IDENTITY FULL` is set on all 15 tables so TOAST'd JSONB columns are fully replicated during UPDATEs. Column names/types follow the **CCE 2.0.0** schema: the canonical reference is `cce-common-util/docs/data-dictionary.md`, with `matcher_event_log` / `facility` in the Matcher Service repo and `inbound_event_log` in the Collector Service repo.
+>
+> **2.0.0 split the 1.x compliance service** into the Protocol (definitional plane), Matcher (runtime plane) and Step SLA (deadline judgement) services. What that changed here: `compliance_event_log` → `matcher_event_log`; `step_instance.state` / `completion_status` / `overdue_date` / `missed_date` → `step_status` + `sla_status`, with the thresholds moved to the new `step_sla_state_transition`; `completed_by_event_id` → `matched_event_id`; `protocol_instance.protocol_canonical` and `deviation.protocol_instance_id` dropped; `intelligence_event_log.step_state` → `step_status` + `sla_status`. The same names carry through to ClickHouse.
+>
+> **Not captured:** `trigger_index` (Protocol Service) is a derived matching index rebuilt from `protocol_definition` on every load; nothing in analytics reads it.
 >
 > **Adaptor tables:** `receiver_adaptor` + `destination_adaptor_mapping` are captured (the adaptor name/endpoint/routing is **not** denormalized onto `intelligence_delivery`); resolve delivery → adaptor via `dict_delivery_adaptor` (schema/05).
 >
-> **`facility`** is now owned by the compliance service (`FacilityReferenceService`, Flyway `V3__facility.sql`) and CDC'd like any other table — it is **no longer** a static reference list loaded by SQL. schema/08 is now documentation-only; the table DDL lives in schema/01 and its Kafka consumer objects in schema/02.
+> **`facility`** is owned by the matcher service (created in its Flyway `V1__initial_schema.sql`) and CDC'd like any other table — it is **no longer** a static reference list loaded by SQL. schema/08 is now documentation-only; the table DDL lives in schema/01 and its Kafka consumer objects in schema/02.
 >
-> **History tables:** `protocol_instance_history` + `step_instance_history` are append-only transition logs (Flyway `V4__state_history.sql`, written by `StateTransitionHistoryService`). They are CDC'd forward but read **only** by the schema/09 backfill — normal forward operation never queries them (see [Architecture Overview § 6](architecture-overview.md#6-data-domains)).
+> **History tables:** `protocol_instance_history` + `step_instance_history` are append-only transition logs (Matcher `V1__initial_schema.sql`, written by cce-common-util's `StateTransitionHistoryWriter` — Matcher for enrolment/creation/completion, Step SLA for every `sla_status` it applies). Ids are allocated in blocks of 50 per writer (Matcher V6), so order history by `changed_at`, never by `id`. They are CDC'd forward but read **only** by the schema/09 backfill — normal forward operation never queries them (see [Architecture Overview § 6](architecture-overview.md#6-data-domains)).
 >
 > **Excluded columns:** two large unused JSONB columns are dropped at the connector — `intelligence_event_log.event_payload` and `intelligence_delivery.fhir_payload`.
 
 ### 2.2 Deduplication & Delete Handling
 
-The 14 base tables are pre-created via `schema/01-create-tables.sql`; the consumer MVs
+The 15 base tables are pre-created via `schema/01-create-tables.sql`; the consumer MVs
 (`schema/02`) insert into them.
 
 **Engine:** `ReplacingMergeTree(_version, _is_deleted)` with `SETTINGS clean_deleted_rows = 'Always', min_age_to_force_merge_seconds = 120` (ClickHouse 23.2+).
@@ -135,11 +140,11 @@ Notes:
 
 | Category | Tables | Engine | Purpose |
 |----------|--------|--------|---------|
-| Event logs | `inbound_event_logs`, `compliance_event_logs` | ReplacingMergeTree | Raw event audit trail |
-| Domain entities | `protocol_instances`, `step_instances`, `deviations` | ReplacingMergeTree | Protocol lifecycle |
+| Event logs | `inbound_event_logs`, `matcher_event_logs` | ReplacingMergeTree | Raw event audit trail |
+| Domain entities | `protocol_instances`, `step_instances`, `step_sla_state_transitions`, `deviations` | ReplacingMergeTree | Protocol lifecycle and SLA schedule |
 | State history | `protocol_instance_history`, `step_instance_history` | ReplacingMergeTree (append-only) | Point-in-time transition logs; backfill-only input (schema/09) |
 | Intelligence | `intelligence_event_logs`, `intelligence_deliveries` | ReplacingMergeTree | Trigger & delivery audit |
-| Reference data | `protocol_definitions`, `action_definitions`, `facility` | ReplacingMergeTree | Lookup/dimension tables (`facility` CDC'd from the compliance service) |
+| Reference data | `protocol_definitions`, `action_definitions`, `facility` | ReplacingMergeTree | Lookup/dimension tables (`facility` CDC'd from the matcher service) |
 | Adaptor routing | `receiver_adaptor`, `destination_adaptor_mapping` | ReplacingMergeTree | Delivery adaptor name/endpoint/routing |
 
 ### 3.2 MATERIALIZED Columns (Field Extraction)
@@ -163,7 +168,7 @@ practitioner_display String MATERIALIZED
 
 `facility_id` is also MATERIALIZED but is not a single `JSONExtractString` call — it re-derives the
 facility from the raw FHIR resource directly rather than trusting the envelope, mirroring
-compliance-service's `FacilityService` and openhim-cce-emitter-adaptor's `FacilityIdExtractor`:
+matcher-service's `FacilityService` and openhim-cce-emitter-adaptor's `FacilityIdExtractor`:
 `Encounter.hospitalization.origin` (the true reporting facility on a `TRANSFER_ENCOUNTER` — per FHIR
 R4, `hospitalization` is only ever populated there) → `location[0].location` (the fallback for
 non-transfer encounters, which never carry `hospitalization`) → the direct `location` Reference for
@@ -209,15 +214,16 @@ extension is deliberately never consulted. See the `facility_id` column in
 | `id` | UUID |
 | `patient_id` | String |
 | `protocol_definition_id` | UUID |
-| `protocol_canonical` | String |
 | `status` | String |
 | `enrolled_at` | DateTime64(6) |
+| `created_at` | DateTime64(6) |
 | `updated_at` | DateTime64(6) |
-| `expires_at` | Nullable(DateTime64(6)) |
 | `_version` | UInt64 |
 | `_is_deleted` | UInt8 |
 
 **Engine:** `ReplacingMergeTree(_version, _is_deleted) SETTINGS clean_deleted_rows = 'Always'` | **Partition:** `toYYYYMM(enrolled_at)` | **Order By:** `(id)`
+
+No `protocol_canonical` since 2.0.0 — resolve it with `dictGet('dict_protocol_definitions', 'canonical', protocol_definition_id)`.
 
 #### `step_instances`
 
@@ -225,40 +231,74 @@ extension is deliberately never consulted. See the `facility_id` column in
 |--------|------|
 | `id` | UUID |
 | `protocol_instance_id` | UUID |
-| `action_id` | UUID |
-| `state` | String |
-| `completion_status` | String (EARLY / ON_TIME / LATE) |
+| `action_id` | String |
 | `repeat_index` | Int32 |
-| `required_behavior` | String |
+| `step_status` | String (`NOT_STARTED` / `COMPLETED`) — written by Matcher |
+| `sla_status` | String (`''` = not yet judged / `OVERDUE` / `MISSED` / `MET`) — written by Step SLA |
 | `due_date` | Nullable(DateTime64(6)) |
-| `overdue_date` | Nullable(DateTime64(6)) |
-| `missed_date` | Nullable(DateTime64(6)) |
+| `completed_at` | Nullable(DateTime64(6)) — clinical time of the completing event |
+| `completed_by_source` | String |
+| `matched_event_id` | Nullable(UUID) → `matcher_event_logs.id` |
+| `required_behavior` | String (`must` / `could` / `must-unless-documented`) |
 | `created_at` | DateTime64(6) |
 | `updated_at` | DateTime64(6) |
-| `completed_at` | Nullable(DateTime64(6)) |
 | `_version` | UInt64 |
 | `_is_deleted` | UInt8 |
 
 **Engine:** `ReplacingMergeTree(_version, _is_deleted) SETTINGS clean_deleted_rows = 'Always'` | **Partition:** `toYYYYMM(created_at)` | **Order By:** `(id)`
+
+The two statuses are independent — read them as a pair:
+
+| `step_status` | `sla_status` | Meaning |
+|---|---|---|
+| `COMPLETED` | `MET` | Recorded on time |
+| `COMPLETED` | `OVERDUE` | Recorded late, before being written off |
+| `COMPLETED` | `MISSED` | Recorded after being written off |
+| `NOT_STARTED` | `''` / `OVERDUE` | Still outstanding |
+| `NOT_STARTED` | `MISSED` | Never recorded; deviation raised |
+
+A completed on-time step can sit at `COMPLETED` + `''` for one Step SLA cycle before `MET` lands, and an optional step never gets an `sla_status` at all.
+
+#### `step_sla_state_transitions`
+
+| Column | Type |
+|--------|------|
+| `id` | UUID |
+| `step_instance_id` | UUID |
+| `transition_type` | String (`DUE_DATE_REACHED` / `MISSED_DATE_REACHED` / `MET_CONDITION_REACHED`) |
+| `process_by` | DateTime64(6) — the threshold (due date, due + tolerance-days, or the on-time `completed_at`) |
+| `is_processed` | UInt8 |
+| `processed_at` | Nullable(DateTime64(6)) |
+| `processed_by` | String |
+| `attempts` | Int32 |
+| `next_attempt_at` | DateTime64(6) |
+| `created_at` | DateTime64(6) |
+| `_version` | UInt64 |
+| `_is_deleted` | UInt8 |
+
+**Engine:** `ReplacingMergeTree(_version, _is_deleted) SETTINGS clean_deleted_rows = 'Always'` | **Partition:** `toYYYYMM(created_at)` | **Order By:** `(id)`
+
+One row per threshold of a mandatory step, unique per `(step_instance_id, transition_type)`. It replaces 1.x `step_instance.overdue_date` / `missed_date`, and is where `mv_daily_deviation_kpis` gets a MISSED deviation's occurrence date.
 
 #### `deviations`
 
 | Column | Type |
 |--------|------|
 | `id` | UUID |
-| `protocol_instance_id` | UUID |
 | `step_instance_id` | UUID |
-| `deviation_type` | LowCardinality(String) |
-| `detected_at` | DateTime64(3) |
+| `deviation_type` | String (`OVERDUE` / `MISSED` / `ORDER_VIOLATION`) |
+| `detected_at` | DateTime64(6) |
 | `intelligence_event_id` | Nullable(UUID) |
-| `metadata` | Nullable(String) |
-| `updated_at` | DateTime64(3) |
+| `metadata` | String |
+| `updated_at` | DateTime64(6) |
 | `_version` | UInt64 |
 | `_is_deleted` | UInt8 |
 
 **Engine:** `ReplacingMergeTree(_version, _is_deleted) SETTINGS clean_deleted_rows = 'Always'`  
 **Partition:** `toYYYYMM(detected_at)`  
 **Order By:** `(id)`
+
+No `protocol_instance_id` since 2.0.0 — join `step_instances` on `step_instance_id` for it.
 
 ---
 
@@ -283,18 +323,18 @@ Materialized Views in ClickHouse are triggered on INSERT — they read from the 
 | `mv_facility_summary` | `inbound_event_logs` | AggregatingMergeTree | `uniqState(subject)`, `countState()` per facility/day |
 | `mv_practitioner_summary` | `inbound_event_logs` | AggregatingMergeTree | `uniqState(subject)`, `countState()` per practitioner/day |
 | `mv_deviation_trends` | `deviations` | SummingMergeTree | `deviation_count` per type/day |
-| `mv_deviation_by_protocol` | `deviations` | SummingMergeTree | `deviation_count` per protocol_instance_id/type |
-| `mv_deviation_by_patient` | `deviations` JOIN `protocol_instances` | AggregatingMergeTree | `countState()` per patient/deviation_type/day |
+| `mv_deviation_by_protocol` | `deviations FINAL` ⋈ `step_instances` (refreshable, 30 s) | SummingMergeTree | `deviation_count` per protocol_instance_id/type |
+| `mv_deviation_by_patient` | `deviations FINAL` ⋈ `step_instances` ⋈ `protocol_instances` (refreshable, 30 s) | AggregatingMergeTree | `countState()` per patient/deviation_type/day |
 | `mv_ingestion_quality` | `inbound_event_logs` | SummingMergeTree | `event_count` per source/status/rejection_reason/day |
-| `mv_compliance_processing_quality` | `compliance_event_logs` | SummingMergeTree | `event_count` per source/processing_status/day |
-| `mv_intelligence_summary` | `intelligence_event_logs` | AggregatingMergeTree | `countState()`, `uniqState(subject)` per action_type/day |
+| `mv_matcher_processing_quality` | `matcher_event_logs` | SummingMergeTree | `event_count` per source/processing_status/day |
+| `mv_intelligence_summary` | `intelligence_event_logs` | AggregatingMergeTree | `countState()`, `uniqState(subject)` per action_type/destination/trigger_reason/step_status/sla_status/day |
 | `mv_intelligence_by_patient` | `intelligence_event_logs` | AggregatingMergeTree | `countState()` per subject/action_type/day |
 | `mv_intelligence_by_protocol` | `intelligence_event_logs` | AggregatingMergeTree | `countState()` per protocol_instance_id/action_type/day |
 | `mv_patient_facility_latest` | `inbound_event_logs` | ReplacingMergeTree(last_seen) | Latest facility per patient (dictionary source) |
-| `step_instances FINAL` | `step_instances` | ReplacingMergeTree | Current state per step; query with FINAL for exact counts |
+| `step_instances FINAL` | `step_instances` | ReplacingMergeTree | Current `step_status` / `sla_status` per step; query with FINAL for exact counts |
 | `intelligence_deliveries FINAL` | `intelligence_deliveries` | ReplacingMergeTree | Current state per delivery; query with FINAL for exact counts |
 
-> **Compliance counts are not a SummingMergeTree/AggregatingMergeTree count MV.** A count MV over the mutable `protocol_instances`/`step_instances` would double-count CDC UPDATEs. Current-state counts come from the **`argMaxState` current-state rollups** (`rollup_protocol_instance_current`, `rollup_step_current` in schema/05 — always fresh, no FINAL) or from the base tables with `FINAL`.
+> **Compliance counts are not a SummingMergeTree/AggregatingMergeTree count MV.** A count MV over the mutable `protocol_instances`/`step_instances` would double-count CDC UPDATEs. Current-state counts come from the **`argMaxState` current-state rollups** (`rollup_protocol_instance_current`, `rollup_step_current` in schema/06 — always fresh, no FINAL) or from the base tables with `FINAL`.
 
 ### 4.3 Entity × Behavior Coverage Matrix
 
@@ -363,9 +403,10 @@ ORDER BY total_events DESC;
 | `protocol_instances` | `idx_patient_id` | `patient_id` |
 | `protocol_instances` | `idx_protocol_definition` | `protocol_definition_id` |
 | `step_instances` | `idx_protocol_instance` | `protocol_instance_id` |
-| `step_instances` | `idx_state` | `state` |
+| `step_instances` | `idx_step_status` | `step_status` |
+| `step_instances` | `idx_sla_status` | `sla_status` |
 | `step_instances` | `idx_action_id` | `action_id` |
-| `deviations` | `idx_protocol_instance` | `protocol_instance_id` |
+| `step_sla_state_transitions` | `idx_step_instance` | `step_instance_id` |
 | `deviations` | `idx_step_instance` | `step_instance_id` |
 | `intelligence_event_logs` | `idx_subject` | `subject` |
 | `intelligence_event_logs` | `idx_protocol_instance` | `protocol_instance_id` |
@@ -412,7 +453,7 @@ LIFETIME(MIN 60 MAX 300)
 LAYOUT(HASHED());
 ```
 
-Used with `dictGet()` for efficient protocol name lookups without JOIN. `canonical` is `url|version` to match `protocol_instances.protocol_canonical`.
+Used with `dictGet()` for efficient protocol name lookups without JOIN. `canonical` is `url|version` — the value 1.x stored on `protocol_instances.protocol_canonical`, which 2.0.0 dropped; `dictGet('dict_protocol_definitions', 'canonical', protocol_definition_id)` replaces it.
 
 ### `dict_patient_facility`
 
@@ -492,7 +533,8 @@ flowchart TD
         ID["intelligence_delivery"]
         AD["action_definition"]
         PD["protocol_definition"]
-        CEL["compliance_event_log"]
+        CEL["matcher_event_log"]
+        SST["step_sla_state_transition"]
     end
 
     subgraph ClickHouse Tables
@@ -504,7 +546,8 @@ flowchart TD
         CH_ID["intelligence_deliveries"]
         CH_AD["action_definitions"]
         CH_PD["protocol_definitions"]
-        CH_CEL["compliance_event_logs"]
+        CH_CEL["matcher_event_logs"]
+        CH_SST["step_sla_state_transitions"]
     end
 
     subgraph Materialized Views
@@ -515,7 +558,7 @@ flowchart TD
         MV5["mv_deviation_by_protocol"]
         MV6["mv_deviation_by_patient"]
         MV7["mv_ingestion_quality"]
-        MV8["mv_compliance_processing_quality"]
+        MV8["mv_matcher_processing_quality"]
         MV9["mv_intelligence_summary"]
         MV10["mv_intelligence_by_patient"]
         MV11["mv_intelligence_by_protocol"]
@@ -537,6 +580,7 @@ flowchart TD
     AD -->|CDC| CH_AD
     PD -->|CDC| CH_PD
     CEL -->|CDC| CH_CEL
+    SST -->|CDC| CH_SST
 
     CH_IEL --> MV1
     CH_IEL --> MV2
@@ -546,6 +590,8 @@ flowchart TD
     CH_DEV --> MV4
     CH_DEV --> MV5
     CH_DEV --> MV6
+    CH_SI -.->|protocol_instance_id| MV5
+    CH_SI -.->|protocol_instance_id| MV6
     CH_CEL --> MV8
     CH_IEG --> MV9
     CH_IEG --> MV10
@@ -564,7 +610,7 @@ flowchart TD
 | `inbound_event_logs` | 90 days | High-volume log; set in schema/03 |
 | `intelligence_event_logs` | 90 days | High-volume trigger log; set in schema/03 |
 | `intelligence_deliveries` | 90 days | High-volume delivery log; set in schema/03 |
-| `compliance_event_logs` | 90 days | High-volume compliance log; set in schema/03 |
+| `matcher_event_logs` | 90 days | High-volume matcher processing log; set in schema/04 |
 | `deviations` | (none) | Clinical compliance record — retained indefinitely |
 | `protocol_instances` | (none) | Active patient data |
 | `step_instances` | (none) | Active workflow data |
@@ -608,15 +654,28 @@ LIMIT 20;
 -- Query protocol_instances FINAL for live status counts. There is intentionally NO
 -- count MV: countIfState(status='X') double-counts rows updated via CDC.
 -- Faster + always-fresh alternative: the argMaxState rollups (rollup_protocol_instance_current
--- / rollup_step_current, schema/05) — no FINAL, no scan-and-dedup. See deployment-guide.md § Step 4.
+-- / rollup_step_current, schema/06) — no FINAL, no scan-and-dedup. See deployment-guide.md § Step 4.
 SELECT
-    pi.protocol_canonical,
+    dictGet('dict_protocol_definitions', 'canonical', pi.protocol_definition_id) AS protocol_canonical,
     count()                                                                AS total,
     countIf(pi.status = 'COMPLETED')                                       AS completed,
     round(countIf(pi.status = 'COMPLETED') / nullIf(count(), 0) * 100, 1) AS pct
 FROM protocol_instances pi FINAL
-GROUP BY pi.protocol_canonical
+GROUP BY protocol_canonical
 ORDER BY total DESC;
+```
+
+### Step Timeliness (two-status pair)
+```sql
+SELECT
+    si.action_id,
+    countIf(si.step_status = 'COMPLETED' AND si.sla_status = 'MET')                   AS on_time,
+    countIf(si.step_status = 'COMPLETED' AND si.sla_status IN ('OVERDUE', 'MISSED'))  AS late,
+    countIf(si.step_status = 'NOT_STARTED' AND si.sla_status IN ('', 'OVERDUE'))      AS outstanding,
+    countIf(si.step_status = 'NOT_STARTED' AND si.sla_status = 'MISSED')              AS missed
+FROM step_instances si FINAL
+GROUP BY si.action_id
+ORDER BY missed DESC;
 ```
 
 ### Deviation Trends

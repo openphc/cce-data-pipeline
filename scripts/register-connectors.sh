@@ -4,9 +4,9 @@
 # Prerequisites (run in this order):
 #   1. ClickHouse schema applied:        schema/01-create-tables.sql + schema/02-kafka-ingestion.sql (+ 03-06)
 #   2. PostgreSQL logical replication:   psql ... -f cdc/01-configure-replication.sql
-#   3. Kafka Connect (debezium/connect) up on cce-net and reachable at $CONNECT_URL
+#   3. Kafka Connect (debezium/connect) up on the shared network and reachable at $CONNECT_URL
 #
-# The connector config (connectors/debezium-postgres-source.json) uses ${CDC_*} placeholders;
+# The connector config (connectors/debezium-postgres-source.json) uses ${POSTGRES_*} placeholders;
 # they are interpolated from the environment here, so source your .env first:
 #   set -a; source .env; set +a
 #
@@ -24,7 +24,7 @@ command -v envsubst >/dev/null || { echo "✗ envsubst (gettext) is required"; e
 
 echo "=== Registering Debezium connector '${NAME}' @ ${CONNECT_URL} ==="
 
-# Interpolate ${CDC_*} into the connector JSON.
+# Interpolate ${POSTGRES_*} into the connector JSON.
 PAYLOAD="$(envsubst < "$CONNECTOR_FILE")"
 
 # Wait for Kafka Connect REST.

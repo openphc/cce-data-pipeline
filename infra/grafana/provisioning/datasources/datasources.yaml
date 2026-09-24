@@ -30,4 +30,4 @@ datasources:
     jsonData:
       sslmode: disable
     secureJsonData:
-      password: ${CDC_PASSWORD}
+      password: ${POSTGRES_READ_ONLY_PASSWORD}

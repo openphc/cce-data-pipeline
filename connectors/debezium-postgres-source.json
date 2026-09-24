@@ -4,11 +4,11 @@
     "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
     "tasks.max": "1",
 
-    "database.hostname": "${CDC_PG_HOST}",
-    "database.port": "${CDC_PG_PORT}",
-    "database.user": "${CDC_USER}",
-    "database.password": "${CDC_PASSWORD}",
-    "database.dbname": "${CDC_PG_DATABASE}",
+    "database.hostname": "${POSTGRES_HOST}",
+    "database.port": "${POSTGRES_PORT}",
+    "database.user": "${POSTGRES_READ_ONLY_USER}",
+    "database.password": "${POSTGRES_READ_ONLY_PASSWORD}",
+    "database.dbname": "${POSTGRES_DATABASE}",
 
     "topic.prefix": "cce",
     "plugin.name": "pgoutput",
@@ -17,7 +17,7 @@
     "publication.autocreate.mode": "disabled",
 
     "snapshot.mode": "initial",
-    "table.include.list": "public.inbound_event_log,public.protocol_definition,public.protocol_instance,public.step_instance,public.deviation,public.intelligence_event_log,public.intelligence_delivery,public.action_definition,public.compliance_event_log,public.receiver_adaptor,public.destination_adaptor_mapping,public.facility,public.protocol_instance_history,public.step_instance_history",
+    "table.include.list": "public.inbound_event_log,public.protocol_definition,public.protocol_instance,public.step_instance,public.step_sla_state_transition,public.deviation,public.intelligence_event_log,public.intelligence_delivery,public.action_definition,public.matcher_event_log,public.receiver_adaptor,public.destination_adaptor_mapping,public.facility,public.protocol_instance_history,public.step_instance_history",
     "column.exclude.list": "public.intelligence_event_log.event_payload,public.intelligence_delivery.fhir_payload",
 
     "key.converter": "org.apache.kafka.connect.json.JsonConverter",
