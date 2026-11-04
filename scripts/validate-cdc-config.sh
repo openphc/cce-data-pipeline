@@ -53,13 +53,14 @@ else
     FAILURES=$((FAILURES + 1))
 fi
 
-# Check publication tables (all 15)
+# Check publication tables (all 16)
 echo ""
 echo "--- Publication Tables ---"
 EXPECTED_TABLES=(
     "protocol_definition"
     "protocol_instance"
     "step_instance"
+    "step_group_instance"
     "step_sla_state_transition"
     "deviation"
     "inbound_event_log"

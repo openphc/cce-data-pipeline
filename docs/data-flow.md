@@ -70,6 +70,7 @@ A Debezium PostgreSQL connector on Kafka Connect reads the WAL via logical repli
 | Protocol Service | `action_definition` | `action_definitions` |
 | Matcher Service | `protocol_instance` | `protocol_instances` |
 | Matcher Service (+ Step SLA writes `sla_status`) | `step_instance` | `step_instances` |
+| Matcher Service (+ Step SLA writes `sla_status`) | `step_group_instance` | `step_group_instances` |
 | Matcher Service (Step SLA marks processed) | `step_sla_state_transition` | `step_sla_state_transitions` |
 | Matcher Service | `protocol_instance_history` | `protocol_instance_history` |
 | Matcher + Step SLA (append-only) | `step_instance_history` | `step_instance_history` |
@@ -81,7 +82,7 @@ A Debezium PostgreSQL connector on Kafka Connect reads the WAL via logical repli
 | Intelligence Service | `receiver_adaptor` | `receiver_adaptor` |
 | Intelligence Service | `destination_adaptor_mapping` | `destination_adaptor_mapping` |
 
-> **Note:** All CCE services share a single PostgreSQL database (`ccedb`). `REPLICA IDENTITY FULL` is set on all 15 tables so TOAST'd JSONB columns are fully replicated during UPDATEs. Column names/types follow the **CCE 2.0.0** schema: the canonical reference is `cce-common-util/docs/data-dictionary.md`, with `matcher_event_log` / `facility` in the Matcher Service repo and `inbound_event_log` in the Collector Service repo.
+> **Note:** All CCE services share a single PostgreSQL database (`ccedb`). `REPLICA IDENTITY FULL` is set on all 16 tables so TOAST'd JSONB columns are fully replicated during UPDATEs. Column names/types follow the **CCE 2.0.0** schema: the canonical reference is `cce-common-util/docs/data-dictionary.md`, with `matcher_event_log` / `facility` in the Matcher Service repo and `inbound_event_log` in the Collector Service repo.
 >
 > **2.0.0 split the 1.x compliance service** into the Protocol (definitional plane), Matcher (runtime plane) and Step SLA (deadline judgement) services. What that changed here: `compliance_event_log` → `matcher_event_log`; `step_instance.state` / `completion_status` / `overdue_date` / `missed_date` → `step_status` + `sla_status`, with the thresholds moved to the new `step_sla_state_transition`; `completed_by_event_id` → `matched_event_id`; `protocol_instance.protocol_canonical` and `deviation.protocol_instance_id` dropped; `intelligence_event_log.step_state` → `step_status` + `sla_status`. The same names carry through to ClickHouse.
 >
@@ -97,7 +98,7 @@ A Debezium PostgreSQL connector on Kafka Connect reads the WAL via logical repli
 
 ### 2.2 Deduplication & Delete Handling
 
-The 15 base tables are pre-created via `schema/01-create-tables.sql`; the consumer MVs
+The 16 base tables are pre-created via `schema/01-create-tables.sql`; the consumer MVs
 (`schema/02`) insert into them.
 
 **Engine:** `ReplacingMergeTree(_version, _is_deleted)` with `SETTINGS clean_deleted_rows = 'Always', min_age_to_force_merge_seconds = 120` (ClickHouse 23.2+).
@@ -232,6 +233,7 @@ No `protocol_canonical` since 2.0.0 — resolve it with `dictGet('dict_protocol_
 | `id` | UUID |
 | `protocol_instance_id` | UUID |
 | `action_id` | String |
+| `step_group_instance_id` | Nullable(UUID) → `step_group_instances.id`. Null for a step in no group |
 | `repeat_index` | Int32 |
 | `step_status` | String (`NOT_STARTED` / `COMPLETED`) — written by Matcher |
 | `sla_status` | String (`''` = not yet judged / `OVERDUE` / `MISSED` / `MET`) — written by Step SLA |
@@ -259,12 +261,43 @@ The two statuses are independent — read them as a pair:
 
 A completed on-time step can sit at `COMPLETED` + `''` for one Step SLA cycle before `MET` lands, and an optional step never gets an `sla_status` at all.
 
+#### `step_group_instances`
+
+A step group is a set of steps that belong together, such as one ANC visit. The protocol defines it.
+Each time a patient's group opens, the Matcher writes one row here. A group that repeats, such as one
+visit per day, gets one row per cycle.
+
+| Column | Type |
+|--------|------|
+| `id` | UUID |
+| `protocol_instance_id` | UUID |
+| `parent_group_instance_id` | Nullable(UUID). The enclosing group's row, for a group inside a group. Null for a top-level group |
+| `group_action_id` | String. The group's `action.id` in the protocol |
+| `cycle_index` | Int32. 0 for the first cycle, then 1, 2, … in the order the cycles opened |
+| `due_date` | Nullable(DateTime64(6)). When the group's first steps are due. Null when nothing sets it |
+| `sla_status` | String (`''` / `OVERDUE` / `MISSED` / `MET`). The verdict on the group's own deadline. Written by Step SLA |
+| `opened_at` | DateTime64(6). Clinical time of what opened the row. A calendar-day cycle's day is this date in the deployment's time zone |
+| `completed_at` | Nullable(DateTime64(6)). When the last mandatory step was done |
+| `closed_at` | Nullable(DateTime64(6)). From when nothing more is expected |
+| `created_at` | DateTime64(6) |
+| `updated_at` | DateTime64(6) |
+| `_version` | UInt64 |
+| `_is_deleted` | UInt8 |
+
+**Engine:** `ReplacingMergeTree(_version, _is_deleted) SETTINGS clean_deleted_rows = 'Always'` | **Partition:** `toYYYYMM(created_at)` | **Order By:** `(id)`
+
+To list a patient's visits with their steps, join `step_instances` on `step_group_instance_id`.
+
+Not filled yet: group deadlines (`due_date` judged into `sla_status`), `completed_at` and `closed_at`
+come in later Matcher phases. Until then they stay empty.
+
 #### `step_sla_state_transitions`
 
 | Column | Type |
 |--------|------|
 | `id` | UUID |
-| `step_instance_id` | UUID |
+| `step_instance_id` | Nullable(UUID). Null for a group's row |
+| `step_group_instance_id` | Nullable(UUID). Set only for a group's row |
 | `transition_type` | String (`DUE_DATE_REACHED` / `MISSED_DATE_REACHED` / `MET_CONDITION_REACHED`) |
 | `process_by` | DateTime64(6) — the threshold (due date, due + tolerance-days, or the on-time `completed_at`) |
 | `is_processed` | UInt8 |
@@ -278,14 +311,15 @@ A completed on-time step can sit at `COMPLETED` + `''` for one Step SLA cycle be
 
 **Engine:** `ReplacingMergeTree(_version, _is_deleted) SETTINGS clean_deleted_rows = 'Always'` | **Partition:** `toYYYYMM(created_at)` | **Order By:** `(id)`
 
-One row per threshold of a mandatory step, unique per `(step_instance_id, transition_type)`. It replaces 1.x `step_instance.overdue_date` / `missed_date`, and is where `mv_daily_deviation_kpis` gets a MISSED deviation's occurrence date.
+One row per threshold of a mandatory step, unique per `(step_instance_id, transition_type)`. A group with its own deadline gets the same rows, pointing at its group instance instead. Each row has exactly one of the two ids. It replaces 1.x `step_instance.overdue_date` / `missed_date`, and is where `mv_daily_deviation_kpis` gets a MISSED deviation's occurrence date.
 
 #### `deviations`
 
 | Column | Type |
 |--------|------|
 | `id` | UUID |
-| `step_instance_id` | UUID |
+| `step_instance_id` | Nullable(UUID). Null for a group's deviation |
+| `step_group_instance_id` | Nullable(UUID). Set only for a group's deviation |
 | `deviation_type` | String (`OVERDUE` / `MISSED` / `ORDER_VIOLATION`) |
 | `detected_at` | DateTime64(6) |
 | `intelligence_event_id` | Nullable(UUID) |
@@ -299,6 +333,11 @@ One row per threshold of a mandatory step, unique per `(step_instance_id, transi
 **Order By:** `(id)`
 
 No `protocol_instance_id` since 2.0.0 — join `step_instances` on `step_instance_id` for it.
+
+A deviation is about a step or, for a group with its own deadline, about a group instance. Each row
+has exactly one of the two ids. Step-level counts join `step_instances` on `step_instance_id`, so a
+group's deviation is left out of them. Only `mv_deviation_trends` counts every deviation, a group's
+included.
 
 ---
 
