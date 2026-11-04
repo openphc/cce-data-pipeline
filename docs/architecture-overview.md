@@ -166,7 +166,7 @@ All 15 CDC tables reside in the shared `ccedb` database (columns follow the CCE 
 - **SummingMergeTree** — Simple additive rollups (counts per hour/day)
 - **Dictionaries** — Fast key-value lookups replacing JOINs (4 dictionaries; the `QUERY...FINAL` sources avoid duplicate rows from unmerged parts — `dict_patient_facility` instead dedups via `argMax` GROUP BY)
 - **Bloom filter indexes** — 17 secondary indexes for fast point lookups on non-ORDER-BY columns (effective under `FINAL`)
-- **TTL** — 90-day hot retention on 4 high-volume log tables
+- **TTL** — 200-day hot retention on 4 high-volume log tables (was 90 until 2026-10-26)
 - **User profile** — `analytics` (readonly, `final=1`) is defined but NOT auto-assigned to the entrypoint-created `cce_pipeline`; analytics reads use explicit `FINAL` (or run `ALTER USER cce_pipeline SETTINGS PROFILE 'analytics'` to auto-apply)
 
 For full schema DDL, MV catalog, Entity × Behavior coverage matrix, and query patterns, see [Data Flow & Schema Design](data-flow.md).

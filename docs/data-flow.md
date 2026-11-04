@@ -607,15 +607,17 @@ flowchart TD
 
 | Table | TTL | Rationale |
 |-------|-----|-----------|
-| `inbound_event_logs` | 90 days | High-volume log; set in schema/03 |
-| `intelligence_event_logs` | 90 days | High-volume trigger log; set in schema/03 |
-| `intelligence_deliveries` | 90 days | High-volume delivery log; set in schema/03 |
-| `matcher_event_logs` | 90 days | High-volume matcher processing log; set in schema/04 |
+| `inbound_event_logs` | 200 days | High-volume log; set in schema/04 |
+| `intelligence_event_logs` | 200 days | High-volume trigger log; set in schema/04 |
+| `intelligence_deliveries` | 200 days | High-volume delivery log; set in schema/04 |
+| `matcher_event_logs` | 200 days | High-volume matcher processing log; set in schema/04 |
 | `deviations` | (none) | Clinical compliance record — retained indefinitely |
 | `protocol_instances` | (none) | Active patient data |
 | `step_instances` | (none) | Active workflow data |
 
-> Healthcare regulations (e.g., HIPAA) typically require 7-year retention. The 90-day TTL applies to the ClickHouse hot tier. Configure cold-tier archival to object storage with a separate 7-year TTL to meet compliance requirements.
+> The TTL was 90 days until 2026-10-26. When ingestion paused, 90 days was short enough for every row in PROD's log tables to age out, so it was raised to 200.
+>
+> Healthcare regulations (e.g., HIPAA) typically require 7-year retention. The 200-day TTL applies to the ClickHouse hot tier. Configure cold-tier archival to object storage with a separate 7-year TTL to meet compliance requirements.
 
 Partitioning by `toYYYYMM()` on date columns enables efficient partition-level drops for aged data.
 
